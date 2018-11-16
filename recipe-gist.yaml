@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates a Lambda functions that tags EBS volumes attaced to ASG and also cleans up old orphaned volumes"
+
+Parameters:
+  ImageId:
+    Description: 'The AMI that is being launched'
+    Type: AWS::EC2::Image::Id
+    
+  SecurityGroup:
+    Description: 'List of security groups to be attached to the instanced launched for the ASG'
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    
+  InstanceType:
+    Description: 'The type of EC2 instance to launch'
+    Type: String
+    Default: t3.small
+  
+  KeyName:
+    Description: 'The EC2 keypair to attach to the launched instance for SSH/RDP access'
+    Type: String
+    
+  InstanceProfile:
+    Description: 'The name of the IAM instance profile to attach to the launched instance'
+    Type: String
+  
+  CapacityDesired:
+    Description: 'The desired number of instances to have in the ASG'
+    Type: Number
+    Default: 1
+    MinValue: 1    
+  
+  CapacityMin:
+    Description: 'The minimum number of instance to have in the ASG'
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+  CapacityMax:
+    Description: 'The maximum number of instance to have in the ASG'
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+  CodeBucket:
+    Description: 'The name of the S3 bucket where code artifacts are stored.'
+    Type: String
+
+  SNSTopicName:
+    Description: 'The name of the SNS topic to use for autoscaling events'
+    Type: String
+
+  PackageKey:
+    Description: 'The file name of the package to use'
+    Type: String
+    Default: 'lambda-X.Y.Z.zip'
+
+  RetentionPeriod:
+    Description: 'The number of days to retain orphaned volumes before deletion'
+    Type: Number
+    Default: 30
+    MinValue: 1
+
+Resources:
+  RoleLambdaTagging:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EBS-Tagging-Lambda-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service: lambda.amazonaws.com
+      Path: "/"
+      Policies:
+      - PolicyName: tagging
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: 'arn:aws:logs:*:*:*'
+          - Effect: Allow
+            Action:
+            - ec2:Describe*
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ec2:CreateTags
+            Resource: '*'
+
+  RoleLambdaCleanup:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EBS-Cleanup-Lambda-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service: lambda.amazonaws.com
+      Path: "/"
+      Policies:
+      - PolicyName: cleanup
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: 'arn:aws:logs:*:*:*'
+          - Effect: Allow
+            Action:
+            - ec2:Describe*
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ec2:DeleteVolume
+            Resource: '*'
+          
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref 'ImageId'
+      SecurityGroups: !Ref 'SecurityGroup'
+      InstanceType: !Ref 'InstanceType'
+      AssociatePublicIpAddress: false
+      KeyName: !Ref 'KeyName'
+      IamInstanceProfile: !Ref 'InstanceProfile'
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeSize: 8
+          DeleteOnTermination: false
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT1M
+    Properties:
+      AvailabilityZones: !GetAZs ''
+      Cooldown: '300'
+      DesiredCapacity: !Ref 'CapacityDesired'
+      MinSize: !Ref 'CapacityMin'
+      MaxSize: !Ref 'CapacityMax'
+      LaunchConfigurationName: !Ref 'LaunchConfig'
+      NotificationConfigurations:
+        - TopicARN: !Ref 'SNSAutoScale'
+          NotificationTypes:
+            - autoscaling:EC2_INSTANCE_LAUNCH
+            - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+            - autoscaling:EC2_INSTANCE_TERMINATE
+            - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref 'AutoScalingGroup'
+      Cooldown: '120'
+      ScalingAdjustment: 1
+
+  SNSAutoScale:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref 'SNSTopicName'
+      DisplayName: Sends out alerts about autoscaling events
+      Subscription:
+        - Endpoint: !GetAtt 'LambdaAddTagFunction.Arn'
+          Protocol: lambda
+
+  LambdaAddTagFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'ebs-asg-tag-new-volumes'
+      Description: 'Add tags to EBS volumes attached to ASG instances'
+      Handler: 'src/ebs-asg-tagging.lambda_handler'
+      Role: !GetAtt ['RoleLambdaTagging', 'Arn']
+      Code:
+        S3Bucket: !Ref 'CodeBucket'
+        S3Key: !Ref 'PackageKey'
+      Runtime: 'python2.7'
+      Timeout: 60
+      MemorySize: 128
+    
+  LambdaPermissionTag:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt ['LambdaAddTagFunction','Arn']
+      Principal: "sns.amazonaws.com"
+      SourceArn: !ImportValue 'SNSAutoScale'        
+
+  CloudWatchCreationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: EBS-Cleanup-Orphaned-Volumes
+      Description: 'Schedule for triggering lambda: ebs-asg-cleanup-volumes'
+      ScheduleExpression: 'cron(0 8 * * ? *)'
+      State: 'ENABLED'
+      Targets:
+      -
+        Arn: !GetAtt ['LambdaCleanupFunction','Arn']
+        Id: 'ebs-cleanup-orphaned-volumes-rule'
+
+  LambdaCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'ebs-asg-cleanup-volumes'
+      Description: 'Cleanup orphaned volumes that were terminated from autoscaling groups'
+      Handler: 'src/ebs-asg-cleanup-volumes.lambda_handler'
+      Role: !GetAtt ['RoleLambdaCleanup', 'Arn']
+      Code:
+        S3Bucket: !Ref 'CodeBucket'
+        S3Key: !Ref 'PackageKey'
+      Runtime: 'python2.7'
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          retention_days: !Ref 'RetentionPeriod'
+      Tags:
+      - Key: Project
+        Value: common
+
+  LambdaPermissionCleanup:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt ['LambdaCleanupFunction','Arn']
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ['CloudWatchCreationRule', 'Arn']

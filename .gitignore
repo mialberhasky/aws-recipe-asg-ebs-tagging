@@ -1,0 +1,7 @@
+/build.properties
+/build
+/dist
+/target
+/tmp
+/env
+*.zip
