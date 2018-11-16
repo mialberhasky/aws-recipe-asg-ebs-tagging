@@ -1,3 +1,5 @@
+See blog entry about this repository at: [https://www.michaelalberhasky.com/coding/2018/11/03/aws-asg-tagging.html](https://www.michaelalberhasky.com/coding/2018/11/03/aws-asg-tagging.html)
+
 ### Why?
 This module contains two Python files for managing EBS volumes created when launching EC2 instances inside of an auto-scaling 
 group. There is no native mechanism (currently) to add tags to a volume when it launches via an auto-scaling event. We have 

@@ -52,7 +52,7 @@ Parameters:
   PackageKey:
     Description: 'The file name of the package to use'
     Type: String
-    Default: 'lambda-X.Y.Z.zip'
+    Default: 'package-x.y.z.zip'
 
   RetentionPeriod:
     Description: 'The number of days to retain orphaned volumes before deletion'
@@ -127,7 +127,6 @@ Resources:
       ImageId: !Ref 'ImageId'
       SecurityGroups: !Ref 'SecurityGroup'
       InstanceType: !Ref 'InstanceType'
-      AssociatePublicIpAddress: false
       KeyName: !Ref 'KeyName'
       IamInstanceProfile: !Ref 'InstanceProfile'
       BlockDeviceMappings:
@@ -194,7 +193,7 @@ Resources:
       Action: "lambda:InvokeFunction"
       FunctionName: !GetAtt ['LambdaAddTagFunction','Arn']
       Principal: "sns.amazonaws.com"
-      SourceArn: !ImportValue 'SNSAutoScale'        
+      SourceArn: !Ref 'SNSAutoScale'
 
   CloudWatchCreationRule:
     Type: AWS::Events::Rule
